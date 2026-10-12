@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent import tools
 from agent.loop import run_once
 from agent.policy import PolicyContext, check
@@ -53,6 +55,17 @@ def test_expired_or_unknown_identity_is_denied():
                     _ctx(principal_id="nobody")):
         allowed, reason = check(context)
         assert allowed is False and reason
+
+
+@pytest.mark.parametrize('changes', [
+    {'principal_id': ''}, {'requested_tool': ''}, {'request_purpose': ''},
+    {'request_purpose': 'unapproved'}, {'expires_at': ''},
+    {'expires_at': 'not-a-date'}, {'expires_at': '2099-01-01T00:00:00'},
+    {'delegation_depth': -1}, {'data_classification': 'unknown'},
+])
+def test_incomplete_or_invalid_authorization_is_denied(changes):
+    allowed, reason = check(_ctx(**changes))
+    assert allowed is False and reason
 
 
 def test_runner_checks_principal_at_tool_boundary(clean_sink, tmp_path, monkeypatch):

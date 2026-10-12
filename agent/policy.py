@@ -67,10 +67,20 @@ def check(context: PolicyContext) -> tuple[bool, str]:
     if context.data_classification == "restricted" and context.egress_enabled:
         return False, "deny: du lieu restricted khong duoc phep egress ra ngoai"
 
+    if context.data_classification not in {"public", "internal", "restricted"}:
+        return False, "deny: classification khong hop le"
+    if context.delegation_depth < 0:
+        return False, "deny: delegation_depth khong hop le"
+    if not all((context.principal_id, context.requested_tool,
+                context.request_purpose, context.expires_at, context.agent_scopes)):
+        return False, "deny: thieu principal/tool/purpose/TTL/scope"
+
     # Rule 2: kiểm tra expires_at
     if context.expires_at:
         try:
             exp = datetime.fromisoformat(context.expires_at)
+            if exp.tzinfo is None:
+                return False, "deny: expires_at phai co mui gio"
             now = datetime.now(timezone.utc)
             if exp <= now:
                 return False, "deny: phien da het han (expires_at qua khu)"
@@ -101,7 +111,7 @@ def check(context: PolicyContext) -> tuple[bool, str]:
 
         # Kiểm tra purpose
         valid_purposes = principal.get("purposes", [])
-        if context.request_purpose and valid_purposes and context.request_purpose not in valid_purposes:
+        if context.request_purpose not in valid_purposes:
             return False, (
                 f"deny: purpose '{context.request_purpose}' khong hop le "
                 f"cho principal '{context.principal_id}'"

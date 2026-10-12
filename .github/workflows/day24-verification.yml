@@ -1,0 +1,68 @@
+name: Day24 verification
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONDONTWRITEBYTECODE: '1'
+      PRE_COMMIT_HOME: ${{ github.workspace }}/.ci-tools/pre-commit-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/.ci-tools/pip-cache
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+      - name: Install locked dependencies and verification tools
+        run: |
+          python -m venv .ci-tools/venv
+          .ci-tools/venv/bin/python -m pip install --require-hashes -r requirements.lock
+          .ci-tools/venv/bin/python -m pip install pre-commit==4.6.2
+          echo "$GITHUB_WORKSPACE/.ci-tools/venv/bin" >> "$GITHUB_PATH"
+          mkdir .ci-tools/gitleaks
+          curl --fail --location --output .ci-tools/gitleaks/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  .ci-tools/gitleaks/gitleaks.tar.gz' | sha256sum --check
+          tar -xzf .ci-tools/gitleaks/gitleaks.tar.gz -C .ci-tools/gitleaks gitleaks
+          echo "$GITHUB_WORKSPACE/.ci-tools/gitleaks" >> "$GITHUB_PATH"
+      - name: Tests, recall and replay evidence
+        run: |
+          python -m pytest tests/ -q --basetemp=.pytest_tmp -p no:cacheprovider
+          python -m pytest tests/test_pii.py tests/test_submission_evidence.py -q -s --basetemp=.pytest_tmp-evidence -p no:cacheprovider
+          python -m agent.check_lure 'corpus/ticket-90*.md'
+          python -c "from pathlib import Path; from agent.ledger import verify; p=Path('reports/ledger.jsonl'); assert p.is_file() and verify(p); print('submission ledger verify=True')"
+      - name: Pre-commit and current submission scan
+        run: |
+          gitleaks version
+          pre-commit run --all-files
+          mkdir .ci-tools/current-submission
+          git archive HEAD | tar -x -C .ci-tools/current-submission
+          gitleaks dir --config .gitleaks.toml --redact .ci-tools/current-submission
+      - name: Verify expected synthetic finding in full history
+        run: |
+          set +e
+          gitleaks git --config .gitleaks.toml --redact --report-format json --report-path .ci-tools/history-findings.json .
+          scanner_exit=$?
+          set -e
+          test "$scanner_exit" -eq 1
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          findings = json.loads(Path('.ci-tools/history-findings.json').read_text())
+          assert len(findings) == 1, 'unexpected findings'
+          finding = findings[0]
+          assert finding['RuleID'] == 'lab24-synthetic-token'
+          assert finding['Commit'] == '1bdd849922156c868a5ee9293d68f5b72e242d2c'
+          print('Exactly one expected synthetic finding in seed commit')
+          PY

@@ -66,3 +66,16 @@ def test_redact_removes_detected_entities():
     for entity in detected:
         original_value = text[entity["start"] : entity["end"]]
         assert original_value not in redacted, f"redact() vẫn còn lộ {original_value!r}"
+
+
+def test_explicit_bank_context_overrides_ambiguous_digit_lengths():
+    text = "STK: 123456789012; số tài khoản 0123456789; CCCD 012345678912."
+    entities = pii.detect(text)
+    assert [(e['type'], text[e['start']:e['end']]) for e in sorted(entities, key=lambda e: e['start'])] == [
+        ('VN_BANK_ACCOUNT', '123456789012'),
+        ('VN_BANK_ACCOUNT', '0123456789'),
+        ('VN_CCCD', '012345678912'),
+    ]
+    redacted = pii.redact(text)
+    assert redacted.count('[REDACTED_VN_BANK_ACCOUNT]') == 2
+    assert '012345678912' not in redacted

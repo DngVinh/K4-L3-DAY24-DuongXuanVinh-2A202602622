@@ -60,6 +60,10 @@ _BANK_STANDALONE_RE = re.compile(r"\b\d{8,16}\b")
 def detect(text: str) -> list[dict]:
     """Detect PII entities in Vietnamese text using regex patterns."""
     entities: list[dict] = []
+    # An explicit account label disambiguates 12-digit accounts from CCCD
+    # and accounts beginning with 0 from phone numbers.
+    bank_matches = list(_BANK_CONTEXT_RE.finditer(text))
+    bank_spans = {(m.start(1), m.end(1)) for m in bank_matches}
 
     # 1) EMAIL — highest priority, won't collide with digit patterns
     for m in _EMAIL_RE.finditer(text):
@@ -67,10 +71,14 @@ def detect(text: str) -> list[dict]:
 
     # 2) VN_CCCD — exactly 12 digits
     for m in _CCCD_RE.finditer(text):
+        if (m.start(), m.end()) in bank_spans:
+            continue
         entities.append({"type": "VN_CCCD", "start": m.start(), "end": m.end()})
 
     # 3) VN_PHONE — starts with 0, 10-11 digits total
     for m in _PHONE_RE.finditer(text):
+        if any(m.start() < end and start < m.end() for start, end in bank_spans):
+            continue
         # Normalize: strip spaces/dashes to count raw digits
         raw = re.sub(r"[\s\-]", "", m.group())
         if len(raw) < 10 or len(raw) > 11:
@@ -79,7 +87,7 @@ def detect(text: str) -> list[dict]:
 
     # 4) VN_BANK_ACCOUNT — context-based first, then standalone
     bank_positions: set[tuple[int, int]] = set()
-    for m in _BANK_CONTEXT_RE.finditer(text):
+    for m in bank_matches:
         start = m.start(1)
         end = m.end(1)
         bank_positions.add((start, end))

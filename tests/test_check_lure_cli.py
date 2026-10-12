@@ -38,3 +38,16 @@ def test_missing_pair_is_failure(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         check_lure.main()
     assert exc.value.code == 1
+
+
+def test_submitted_split_lure_requires_both_documents():
+    from pathlib import Path
+    from agent.llm import find_injection
+
+    corpus = Path(__file__).resolve().parent.parent / 'corpus'
+    first = (corpus / 'ticket-904.md').read_text(encoding='utf-8')
+    second = (corpus / 'ticket-904b.md').read_text(encoding='utf-8')
+    assert find_injection(first) is None
+    assert find_injection(second) is None
+    combined = find_injection(first + '\n\n' + second)
+    assert combined is not None and combined.customer_ids == ['KH-000999']

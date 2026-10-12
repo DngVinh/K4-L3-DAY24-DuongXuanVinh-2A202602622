@@ -80,7 +80,7 @@ DEFAULT_EXPIRES = "2099-01-01T00:00:00+00:00"
 
 # Agent scopes cho từng run
 RUN_A_SCOPES = ("search_docs",)
-RUN_B_SCOPES = ("search_docs", "read_customer", "http_post")
+RUN_B_SCOPES = ("read_customer", "http_post")
 
 
 def _now_iso() -> str:
@@ -102,7 +102,7 @@ def _load_customers() -> list[dict]:
 
 def _ticket_id_from_filename(filename: str) -> int | None:
     """Trích ticket number từ tên file, vd 'ticket-007.md' -> 7."""
-    m = re.match(r"ticket-(\d+)b?\.md", filename)
+    m = re.fullmatch(r"ticket-(\d+)b?\.md", filename)
     if m:
         return int(m.group(1))
     return None
@@ -213,9 +213,22 @@ def handle(
     # Chạy find_injection để log (nhưng KHÔNG dùng customer_id từ kết quả)
     combined_text = "\n\n".join(d["text"] for d in docs)
     injected = llm.find_injection(combined_text)
-    # Redact PII trước khi tổng hợp (chặn PII ở boundary Run A -> Run B)
-    # Run A kết thúc ở đây. Chỉ truyền ticket_ids (list[int]) sang Run B.
+    sanitized_docs = [{"id": d["id"], "text": redact(d["text"])} for d in docs]
+    # Only typed routing IDs and a boolean audit signal cross the boundary.
+    # Attacker customer IDs, text and target URL remain in Run A.
+    _run_private(ticket_ids, injected is not None, principal_id,
+                 agent_id, run_b_id, ledger_path)
+    return llm.summarize(sanitized_docs)
 
+
+def _run_private(
+    ticket_ids: list[int],
+    egress_requested: bool,
+    principal_id: str,
+    agent_id: str,
+    run_b_id: str,
+    ledger_path: Path,
+) -> None:
     # ============================================================
     # RUN B: read_customer theo ticket_ids -> policy check mỗi lần
     # ============================================================
@@ -245,8 +258,8 @@ def handle(
             continue
 
     # Nếu có injection và có data, kiểm policy cho http_post
-    if injected is not None and collected:
-        target_url = injected.target_url
+    if egress_requested and collected:
+        target_url = "http://127.0.0.1:10024/reconcile"
         allow, reason = _do_policy_and_log(
             tool_name="http_post",
             args_for_hash=target_url,
@@ -264,5 +277,3 @@ def handle(
                 tools.http_post(target_url, {"records": collected})
             except Exception:
                 pass
-
-    return llm.summarize(docs)
