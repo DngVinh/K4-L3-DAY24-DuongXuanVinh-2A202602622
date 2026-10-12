@@ -37,12 +37,84 @@ rồi gọi verify() phải trả về False.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 
+def _compute_hash(entry_without_hash: dict) -> str:
+    """SHA-256 của JSON canonical (sort_keys=True)."""
+    raw = json.dumps(entry_without_hash, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _get_last_hash(path: Path) -> str:
+    """Lấy hash của dòng cuối cùng trong ledger, hoặc "0"*64 nếu file trống."""
+    if not path.exists():
+        return "0" * 64
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        return "0" * 64
+    last_line = content.splitlines()[-1]
+    entry = json.loads(last_line)
+    return entry.get("hash", "0" * 64)
+
+
 def append(entry: dict, path: Path) -> dict:
-    raise NotImplementedError("BƯỚC 3d: implement ledger append")
+    """Ghi 1 dòng vào ledger với hash chain."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Lấy hash dòng trước
+    prev_hash = _get_last_hash(path)
+
+    # Tạo bản copy, thêm prev_hash, tính hash
+    record = dict(entry)
+    record["prev_hash"] = prev_hash
+    # Tính hash từ bản không có field "hash"
+    record_for_hash = {k: v for k, v in record.items() if k != "hash"}
+    record["hash"] = _compute_hash(record_for_hash)
+
+    # Ghi ra file
+    line = json.dumps(record, ensure_ascii=False)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+    return record
 
 
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    """Xác minh toàn bộ hash chain trong ledger."""
+    if not path.exists():
+        return True
+
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        return True
+
+    lines = content.splitlines()
+    expected_prev = "0" * 64
+
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+
+        # Kiểm tra reason non-empty
+        if not entry.get("reason"):
+            return False
+
+        # Kiểm tra prev_hash
+        if entry.get("prev_hash") != expected_prev:
+            return False
+
+        # Tính lại hash và so sánh
+        stored_hash = entry.get("hash")
+        record_for_hash = {k: v for k, v in entry.items() if k != "hash"}
+        recomputed = _compute_hash(record_for_hash)
+        if stored_hash != recomputed:
+            return False
+
+        expected_prev = stored_hash
+
+    return True
