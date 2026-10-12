@@ -1,64 +1,24 @@
-# Verification — kết quả tự kiểm
+# Verification — Bước 6
 
-## Kiểm tra nộp bài ngày 2026-10-12 (Bước 6)
+Ngày kiểm tra: 2026-10-12. Kết quả dưới đây chạy trên Python 3.14 trong GitHub Actions Linux, với các dependency ứng dụng cài bằng `requirements.lock --require-hashes`; không cần credential hay dịch vụ bên ngoài ngoài GitHub Actions.
 
-- Chạy trên bản sao 91 file tracked trong `.day24-step6-20261012/`, dùng Python trong `.venv`, để fixture không reset `reports/sink.log` hay di chuyển corpus của repo gốc. Bản sao kiểm tra không được đưa vào commit.
-- Lần đầu: `python -m pytest tests/ -q --basetemp=.pytest_tmp -p no:cacheprovider` → **33 passed in 1.56s**, không skip.
-- Rà thêm rubric phát hiện scope rỗng được xem như bỏ qua giới hạn. Đã sửa `agent/policy.py`: luôn giao với `agent_scopes` và, khi delegation, luôn giao với `parent_scopes`; thêm regression test trong `tests/test_obo.py`.
-- Sau sửa: `python -m pytest tests/ -q --basetemp=.pytest_tmp-final -p no:cacheprovider` → **34 passed in 1.33s**, không skip. Test OBO và split xác nhận `dpo` vẫn đọc khách hợp lệ, `support_l1` không đọc restricted, KH-000777 không bị đọc chỉ vì free text.
-- `python -m agent.check_lure corpus/ticket-90*.md` → **4/4 lure sẵn sàng**, biến thể 4 kiểm hai file ghép.
-- `python -m pytest tests/test_pii.py -q -s -p no:cacheprovider` → gold=118, pred=118, tp=112; precision=0.949, recall=0.949. Theo rubric, recall 85–95% tương ứng **7/10**, chưa đạt mức >95%.
-- Ledger gốc: **23 dòng**, verify=True; mọi reason là chuỗi không rỗng; một `http_post` deny ở dòng 23; không có `read_customer` allow của `support_l1`.
-- `attack-before.log` khớp nguyên record KH-000999 trong fixture synthetic; `attack-after.log` **0 byte**. Ba evidence đã được Git theo dõi dù có trong `.gitignore`.
-- Gitleaks **8.30.1**: quét 12 commit lịch sử, exit 1 với đúng **1 finding** `lab24-synthetic-token` tại commit `1bdd849922156c868a5ee9293d68f5b72e242d2c`, là token giả dự kiến. Quét thư mục bản sao bài làm: **no leaks found**, exit 0.
-- **Kiểm tra chưa hoàn tất:** `.venv/Scripts/pre-commit.exe run --all-files` bị Windows Application Control chặn, cả trong sandbox và dưới tài khoản sở hữu repo. Không tắt hay né kiểm soát; không coi việc chạy riêng Gitleaks là hook đã pass. Cần chạy lại pre-commit trong môi trường được phép trước khi xác nhận đủ toàn bộ bước nộp.
-- Compliance mapping vẫn có các tham chiếu pháp luật chưa xác minh điều khoản; không tự chấm điểm tối đa cho mục này. Kết quả mock và dữ liệu giả không chứng minh hệ thống thật an toàn hoặc tuân thủ pháp luật.
+## Kết quả rubric
 
-Các kết quả dưới đây là bằng chứng của lần kiểm tra trước Bước 6.
+- **Test suite:** `python -m pytest tests/ -q --basetemp=.pytest_tmp -p no:cacheprovider` — **50 passed**, 0 failed, 0 skipped.
+- **PII:** `test_pii.py -s` — gold=118, pred=118, tp=118; precision=1.000, recall=1.000. Nhãn ngữ cảnh STK phân biệt tài khoản 12 số với CCCD; email, điện thoại và các lớp khác trong test vẫn được kiểm tra.
+- **Lure:** `python -m agent.check_lure 'corpus/ticket-90*.md'` — **4/4**. Biến thể 904 chỉ vượt ngưỡng khi ghép hai file, có assertion riêng cho hai file đứng một mình.
+- **Replay theo principal:** `tests/test_submission_evidence.py` phát lại bốn lure. Baseline bắt POST synthetic ở mock tool boundary; sau containment, cả hai principal có 0 lệnh `http_post`; `support_l1` có 0 lần đọc restricted, `dpo` vẫn đọc một hồ sơ hợp lệ; ledger của mỗi replay verify=True và không thiếu reason. Chi tiết trong [`replay-verification.md`](replay-verification.md).
+- **Split/redaction:** Run B chỉ nhận ticket ID số và boolean, không nhận ticket text, customer ID hay URL; summary nhận bản đã redact. Test xác nhận KH-000777 không bị đọc chỉ vì free text attacker nhắc ID.
+- **OBO:** principal, tool, purpose, TTL có timezone, agent scope và parent scope được fail closed; có regression test scope rỗng/thiếu, TTL sai hoặc hết hạn, principal lạ, purpose sai và delegation. `dpo` hợp lệ vẫn làm việc.
+- **Ledger:** file nộp `reports/ledger.jsonl` có **23 dòng**, verify=True, mọi reason non-empty; dòng cuối chứa `http_post` deny với reason.
+- **Baseline/after:** `reports/attack-before.log` chứa record synthetic KH-000999 từ baseline localhost; `reports/attack-after.log` **0 byte**. Test replay mới dùng mock boundary để không can thiệp sink/log của phiên lab đang chạy.
+- **Supply chain/secrets:** Gitleaks **8.30.1**; Gitleaks chạy trên toàn bộ 14 commit và xác nhận đúng một finding `lab24-synthetic-token` ở `1bdd849922156c868a5ee9293d68f5b72e242d2c`. `gitleaks dir` trên nội dung bài hiện tại không có finding. `pre-commit run --all-files` — **Passed**. `requirements.lock` hash cho mọi package; workflow xác minh hash SHA-256 bản Gitleaks tải về trước khi dùng.
+- **Compliance/DPIA:** đối chiếu ngày hiệu lực và điều khoản nguyên tắc của Luật 91/2025/QH15 Điều 3 khoản 2–4, Luật 134/2025/QH15 Điều 4, Nghị định 356/2025/NĐ-CP Điều 19 khoản 1–3 với PDF ký chính thức; mapping đánh dấu rõ mối liên hệ nguyên tắc và giới hạn của mock.
 
-## Test suite
+## Workflow thực thi
 
-```
-$ python -m pytest tests/ -q
-.................................                                        [100%]
-33 passed in 0.57s
-```
+GitHub Actions: [Day24 verification — run 38206734216](https://github.com/DngVinh/K4-L3-DAY24-DuongXuanVinh-2A202602622/actions/runs/38206734216) trên commit `8562ee726557fbec4ee2a16696694da8a7362d4b` — conclusion **success**. Workflow đã cài package theo hash lock, chạy test/replay/PII/lure/ledger, chạy hook pre-commit, quét tree hiện tại và kiểm tra đúng finding synthetic duy nhất trong lịch sử. Máy Windows chặn launcher pre-commit cục bộ bằng Application Control; hook sau đó đã được chạy thành công trên runner GitHub Ubuntu, không đổi hoặc tắt kiểm soát máy.
 
-Tất cả 33 test pass, 0 fail, 0 skip.
+## Điều kiện trượt và giới hạn
 
-## Chi tiết từng module
-
-- **test_pii.py:** 2 passed. precision=0.949, recall=0.949 (gold=118, pred=118, tp=112)
-- **test_policy.py:** 4 passed. restricted+egress deny, internal allow, public allow, OBO
-- **test_obo.py:** 5 passed. support_l1 deny read_customer, dpo allow, delegation scope, TTL, runner boundary check
-- **test_split.py:** 1 passed. KH-000777 không bị đọc (containment), customer hợp lệ vẫn đọc được
-- **test_injection.py:** 8 passed. 4 biến thể × 2 principal, PII không ra sink
-- **test_ledger.py:** 3 passed. hash chain, tamper detect, reason non-empty
-- **test_supply_chain.py:** 3 passed. hook pin, lock hash, incident note
-- **test_scaffold_dispatch.py:** 4 passed
-- **test_check_lure_cli.py:** 3 passed
-
-## Gitleaks
-
-Phiên bản: v8.30.1
-
-```
-$ gitleaks git --config .gitleaks.toml --redact --verbose .
-Finding: REDACTED (lab24-synthetic-token, commit 1bdd849)
-leaks found: 1
-
-$ gitleaks dir --config .gitleaks.toml .
-no leaks found
-```
-
-## Ledger verify
-
-```
-$ python -c "from agent.ledger import verify; from pathlib import Path; print(verify(Path('reports/ledger.jsonl')))"
-True
-```
-
-## Before/After
-
-- `reports/attack-before.log`: chứa record synthetic KH-000999 (CCCD, SĐT, STK)
-- `reports/attack-after.log`: rỗng — PII không ra sink sau containment
+Evidence xác nhận `KH-000999` không ra sink sau contain; `KH-000777` không bị đọc từ free text; `support_l1` không đọc restricted; `parent_scopes` rỗng không cấp quyền. Bộ dữ liệu, tài khoản, token và sink là synthetic; scanner chỉ nhận diện token giả dự kiến từ lịch sử. Không có credential hay PII người thật được dùng. `--as`, policy lab, regex và hash chain một file không chứng minh có xác thực production, ngăn xóa đuôi ledger, hay tuân thủ luật trong hệ thống thật.

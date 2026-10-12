@@ -1,45 +1,34 @@
-# DPIA-lite — Đánh giá tác động bảo vệ dữ liệu (phiên bản lab)
+# DPIA-lite — đánh giá tác động trong bài lab
 
-## 1. Dữ liệu xử lý
+**Phạm vi:** bài tập dùng mock trên 26 hồ sơ synthetic tại `data/customers.json`. Đây là tài liệu học tập, không phải hồ sơ đánh giá tác động nộp cơ quan quản lý và không chứng minh tuân thủ pháp luật.
 
-- **Loại:** dữ liệu cá nhân synthetic — CCCD (12 số), số điện thoại, số tài khoản ngân hàng, email, tên khách hàng
-- **Chủ thể:** 26 khách hàng giả lập trong `data/customers.json`
-- **Phân loại:** restricted (hồ sơ khách hàng), internal (nội dung ticket)
+## Dữ liệu và mục đích
 
-## 2. Mục đích xử lý
+- Fixture có tên giả, ID khách trong lab, CCCD, số điện thoại, số tài khoản, email và `related_tickets`. Ticket chứa nội dung giả, được xem là đầu vào không tin cậy.
+- Mock agent tổng hợp ticket hỗ trợ; Run B chỉ tìm hồ sơ theo ticket ID lấy từ tên file và quan hệ `related_tickets`. Policy kiểm tra principal, purpose, TTL và giao quyền scope trước khi gọi tool.
+- Regex nhận diện/redact các định dạng CCCD, điện thoại, tài khoản và email đã biết. Không nhận diện tên; recall/precision trên bộ 118 nhãn synthetic không dự đoán chính xác thực tế production.
 
-Agent tổng hợp ticket hỗ trợ khách hàng, tra cứu hồ sơ khách để phản hồi yêu cầu. Dữ liệu restricted chỉ được đọc khi principal có quyền (dpo), không được gửi ra ngoài hệ thống.
+## Luồng, quyền truy cập và biện pháp
 
-## 3. Luồng dữ liệu
-
+```text
+corpus không tin cậy
+        |
+        v
+Run A: search_docs -> ticket ID số từ tên file -> Run B
+                                           |            |
+                               customers.json       policy trước read
+                                           |            |
+                                           +----> ledger hash-chain
+                                                        |
+                      restricted hồ sơ --X--> http_post bị deny
 ```
-corpus/*.md (untrusted) --> Run A: search_docs --> ticket_ids (int)
-                                                       |
-data/customers.json -----> Run B: read_customer <------+
-                                  |
-                            policy check --> deny http_post (restricted + egress)
-                                  |
-                            ledger.jsonl (ghi mọi quyết định)
-```
 
-- Run A chỉ đọc corpus, trích ticket ID từ tên file, không truyền free text sang Run B
-- Run B tra customer qua `related_tickets`, gọi `read_customer` với policy check trước mỗi lần
-- `http_post` bị deny bởi PEP vì `restricted + egress = deny`
+Run B nhận `list[int]` và cờ boolean; không nhận văn bản ticket, customer ID hoặc URL do attacker trích ra. Summary chỉ nhận tài liệu đã redacted. `support_l1` bị deny truy cập restricted; `dpo` được đọc hồ sơ hợp lệ gắn với ticket. Cả hai đều không được gửi hồ sơ restricted ra sink.
 
-## 4. Rủi ro đã xử lý
+Trong lab, ledger lưu hash arguments thay cho PII thô, nhưng `customers.json` vẫn là dữ liệu plaintext giả và ledger hash-chain một file không phát hiện việc xóa dòng cuối/viết lại toàn bộ. Bằng chứng replay theo 4 lure × 2 principal nằm trong [replay-verification.md](replay-verification.md); bằng chứng log/lịch sử ở [reports](.).
 
-| Rủi ro | Biện pháp | Evidence |
-|---|---|---|
-| Prompt injection qua corpus | Trifecta split — Run B không đọc free text | `agent/runner.py`, `tests/test_split.py` pass |
-| Rò rỉ PII qua sink | PEP deny egress khi data restricted | `reports/ledger.jsonl` dòng 23: http_post deny |
-| Vượt quyền (support_l1 đọc restricted) | OBO check — principal scope intersection | `tests/test_obo.py` pass |
-| Sửa audit log | Hash chain SHA-256 | `tests/test_ledger.py` pass |
-| Secret lộ trong repo | Gitleaks hook + hash lock | `reports/secrets-incident.md` |
+## Ánh xạ và giới hạn pháp lý
 
-## 5. Giới hạn của mock
+Luật Bảo vệ dữ liệu cá nhân 91/2025/QH15 Điều 3 khoản 2–4 nêu giới hạn phạm vi/mục đích, tính chính xác và biện pháp bảo vệ; Nghị định 356/2025/NĐ-CP Điều 19 nêu nội dung đánh giá tác động, gồm mục đích, loại dữ liệu, luồng, biện pháp và rủi ro. Luật Trí tuệ nhân tạo 134/2025/QH15 Điều 4 nêu nguyên tắc con người làm trung tâm, quyền riêng tư, kiểm soát/can thiệp và trách nhiệm giải trình. Nguồn đối chiếu là các bản ký chính thức liên kết trong [compliance-mapping.md](compliance-mapping.md).
 
-- **Không phải production:** dữ liệu synthetic, không có xác thực người dùng thật, `--as` chỉ là mô phỏng principal
-- **Hash chain không chống xóa cuối:** kẻ tấn công có write access vào file ledger có thể xóa dòng cuối hoặc viết lại cả file mà không bị phát hiện nếu không có mốc tin cậy bên ngoài
-- **PII detection dựa regex:** recall ~95%, không bắt được tên người hoặc PII dạng mới. Production cần NER model hoặc Presidio với model tiếng Việt
-- **Allowlist cứng:** `127.0.0.1:10024` chỉ là safety net cho lab, không phải security control cho production
-- **Không có mã hóa:** dữ liệu trong customers.json và ledger lưu plaintext
+Lab không thiết lập căn cứ xử lý, thu thập consent, xác minh danh tính người thật, thực hiện yêu cầu quyền chủ thể, quy trình lưu/xóa production, quản trị khóa, an ninh hạ tầng, hay đánh giá theo bối cảnh tổ chức. Cần đánh giá các nghĩa vụ và rủi ro đó riêng nếu triển khai xử lý dữ liệu thật. Không suy ra an toàn hoặc tuân thủ production từ kết quả mock.
