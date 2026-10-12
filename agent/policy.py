@@ -86,10 +86,10 @@ def check(context: PolicyContext) -> tuple[bool, str]:
 
         # Tính quyền hiệu lực
         allowed_tools = set(principal.get("allowed_tools", []))
-        effective = allowed_tools & set(context.agent_scopes) if context.agent_scopes else allowed_tools
+        effective = allowed_tools & set(context.agent_scopes)
 
         # Nếu delegation_depth > 0, giao thêm với parent_scopes
-        if context.delegation_depth > 0 and context.parent_scopes:
+        if context.delegation_depth > 0:
             effective = effective & set(context.parent_scopes)
 
         # Kiểm tra tool có nằm trong quyền hiệu lực không

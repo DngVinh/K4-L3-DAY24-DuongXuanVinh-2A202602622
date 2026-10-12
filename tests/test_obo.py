@@ -41,6 +41,13 @@ def test_delegation_cannot_expand_parent_scope():
     assert allowed is False and reason
 
 
+def test_empty_agent_or_parent_scopes_grant_no_tools():
+    for context in (_ctx(agent_scopes=()),
+                    _ctx(delegation_depth=1, parent_scopes=())):
+        allowed, reason = check(context)
+        assert allowed is False and reason
+
+
 def test_expired_or_unknown_identity_is_denied():
     for context in (_ctx(expires_at="2000-01-01T00:00:00+00:00"),
                     _ctx(principal_id="nobody")):
