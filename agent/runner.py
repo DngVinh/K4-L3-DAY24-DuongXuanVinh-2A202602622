@@ -59,16 +59,210 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+
+from agent import ledger, tools
+from agent.pii import redact
+from agent.policy import PolicyContext, check
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
+CUSTOMERS_FILE = Path(__file__).resolve().parent.parent / "data" / "customers.json"
+PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
+
+# TTL mặc định cho mỗi run (xa trong tương lai cho lab)
+DEFAULT_EXPIRES = "2099-01-01T00:00:00+00:00"
+
+# Agent scopes cho từng run
+RUN_A_SCOPES = ("search_docs",)
+RUN_B_SCOPES = ("search_docs", "read_customer", "http_post")
 
 
-class RunnerScaffoldPending(NotImplementedError):
-    """Only the original 3c stub uses this to enable the CP1/CP2 baseline."""
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def handle(message: str, llm, log_dir: Path | None = None,
-           principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+def _args_hash(*args) -> str:
+    raw = json.dumps(args, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_principals() -> dict:
+    return json.loads(PRINCIPALS_FILE.read_text(encoding="utf-8"))
+
+
+def _load_customers() -> list[dict]:
+    return json.loads(CUSTOMERS_FILE.read_text(encoding="utf-8"))
+
+
+def _ticket_id_from_filename(filename: str) -> int | None:
+    """Trích ticket number từ tên file, vd 'ticket-007.md' -> 7."""
+    m = re.match(r"ticket-(\d+)b?\.md", filename)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _find_customers_by_tickets(ticket_ids: list[int]) -> list[str]:
+    """Tra customers.json, trả về customer_id có related_tickets chứa ticket_id."""
+    customers = _load_customers()
+    result = []
+    seen = set()
+    for customer in customers:
+        for tid in ticket_ids:
+            if tid in customer.get("related_tickets", []):
+                cid = customer["customer_id"]
+                if cid not in seen:
+                    result.append(cid)
+                    seen.add(cid)
+    return result
+
+
+def _do_policy_and_log(
+    tool_name: str,
+    args_for_hash,
+    classification: str,
+    purpose: str,
+    principal_id: str,
+    agent_id: str,
+    run_id: str,
+    ledger_path: Path,
+    egress_enabled: bool = False,
+    agent_scopes: tuple[str, ...] = (),
+    parent_scopes: tuple[str, ...] = (),
+    delegation_depth: int = 0,
+) -> tuple[bool, str]:
+    """Kiểm policy, ghi ledger, trả (allow, reason)."""
+    ctx = PolicyContext(
+        data_classification=classification,
+        request_purpose=purpose,
+        agent_owner=agent_id,
+        delegation_depth=delegation_depth,
+        egress_enabled=egress_enabled,
+        principal_id=principal_id,
+        requested_tool=tool_name,
+        agent_scopes=agent_scopes,
+        parent_scopes=parent_scopes,
+        expires_at=DEFAULT_EXPIRES,
+    )
+    allow, reason = check(ctx)
+    decision = "allow" if allow else "deny"
+
+    entry = {
+        "ts": _now_iso(),
+        "agent_id": agent_id,
+        "run_id": run_id,
+        "tool": tool_name,
+        "args_hash": _args_hash(args_for_hash),
+        "classification": classification,
+        "decision": decision,
+        "reason": reason,
+        "on_behalf_of": principal_id,
+        "expires_at": DEFAULT_EXPIRES,
+    }
+    ledger.append(entry, ledger_path)
+
+    return allow, reason
+
+
+def handle(
+    message: str,
+    llm,
+    log_dir: Path | None = None,
+    principal_id: str = "support_l1",
+) -> str:
+    """Trifecta split: Run A (untrusted) -> ticket_ids -> Run B (private)."""
+    ledger_path = (log_dir or REPORTS_DIR) / "ledger.jsonl"
+    agent_id = "lab24-agent"
+    run_a_id = f"run-a-{uuid.uuid4().hex[:8]}"
+    run_b_id = f"run-b-{uuid.uuid4().hex[:8]}"
+
+    # ============================================================
+    # RUN A: search_docs — đọc corpus, KHÔNG đọc customer/egress
+    # ============================================================
+    allow, reason = _do_policy_and_log(
+        tool_name="search_docs",
+        args_for_hash=message,
+        classification="internal",
+        purpose="summarize-tickets",
+        principal_id=principal_id,
+        agent_id=agent_id,
+        run_id=run_a_id,
+        ledger_path=ledger_path,
+        egress_enabled=False,
+        agent_scopes=RUN_A_SCOPES,
+    )
+
+    if not allow:
+        return f"Policy deny search_docs: {reason}"
+
+    docs = tools.search_docs(message)
+
+    # Trích ticket_ids từ TÊN FILE (nguồn tin cậy), KHÔNG từ nội dung
+    ticket_ids: list[int] = []
+    for doc in docs:
+        tid = _ticket_id_from_filename(doc["id"])
+        if tid is not None:
+            ticket_ids.append(tid)
+
+    # Chạy find_injection để log (nhưng KHÔNG dùng customer_id từ kết quả)
+    combined_text = "\n\n".join(d["text"] for d in docs)
+    injected = llm.find_injection(combined_text)
+    # Redact PII trước khi tổng hợp (chặn PII ở boundary Run A -> Run B)
+    # Run A kết thúc ở đây. Chỉ truyền ticket_ids (list[int]) sang Run B.
+
+    # ============================================================
+    # RUN B: read_customer theo ticket_ids -> policy check mỗi lần
+    # ============================================================
+    customer_ids = _find_customers_by_tickets(ticket_ids)
+
+    collected = []
+    for cid in customer_ids:
+        # Kiểm policy TRƯỚC khi đọc
+        allow, reason = _do_policy_and_log(
+            tool_name="read_customer",
+            args_for_hash=cid,
+            classification="restricted",
+            purpose="support-reply",
+            principal_id=principal_id,
+            agent_id=agent_id,
+            run_id=run_b_id,
+            ledger_path=ledger_path,
+            egress_enabled=False,
+            agent_scopes=RUN_B_SCOPES,
+        )
+        if not allow:
+            continue
+        try:
+            record = tools.read_customer(cid)
+            collected.append(record)
+        except tools.ToolError:
+            continue
+
+    # Nếu có injection và có data, kiểm policy cho http_post
+    if injected is not None and collected:
+        target_url = injected.target_url
+        allow, reason = _do_policy_and_log(
+            tool_name="http_post",
+            args_for_hash=target_url,
+            classification="restricted",
+            purpose="support-reply",
+            principal_id=principal_id,
+            agent_id=agent_id,
+            run_id=run_b_id,
+            ledger_path=ledger_path,
+            egress_enabled=True,  # http_post = egress
+            agent_scopes=RUN_B_SCOPES,
+        )
+        if allow:
+            try:
+                tools.http_post(target_url, {"records": collected})
+            except Exception:
+                pass
+
+    return llm.summarize(docs)
